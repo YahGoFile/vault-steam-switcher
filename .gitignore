@@ -1,0 +1,20 @@
+# --- secrets & user data (NEVER commit) ---
+*.vault
+vault.json
+*.vault.json
+*.json.bak
+*.vaultbak
+export*.json
+
+# --- python / build ---
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.pytest_cache/
+
+# --- os ---
+.DS_Store
+Thumbs.db

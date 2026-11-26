@@ -345,8 +345,12 @@ def _set_loginusers_most_recent(paths: SteamPaths, account: str) -> bool:
         is_target = info.get("AccountName", "").lower() == account.lower()
         info["MostRecent"] = "1" if is_target else "0"
         if is_target:
+            # Everything Steam needs to sign in silently on launch - no click, no
+            # offline-mode prompt - for an account it already remembers.
             info["RememberPassword"] = "1"
             info["AllowAutoLogin"] = "1"
+            info["WantsOfflineMode"] = "0"
+            info["SkipOfflineModeWarning"] = "1"
             matched = True
     if matched:
         _backup(paths.loginusers)

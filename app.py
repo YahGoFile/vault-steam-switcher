@@ -419,6 +419,9 @@ class VaultApp(ctk.CTk):
         self.search.bind("<KeyRelease>", lambda _: self._render_entries())
         ui.ghost(bar, "Import", self._import_dialog, width=104, icon_name="download").pack(
             side="left", padx=(10, 0))
+        if self.vault.entries:
+            ui.ghost(bar, "Delete all", self._delete_all_dialog, width=118, color=ui.WARN,
+                     icon_name="trash").pack(side="left", padx=(8, 0))
 
         self.entry_body = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         self.entry_body.pack(fill="both", expand=True, padx=26, pady=(8, 20))
@@ -667,6 +670,54 @@ class VaultApp(ctk.CTk):
         top.destroy()
         self.toast.show(f"Deleted “{e.title}”", ui.WARN)
         self._render_entries()
+
+    def _delete_all_dialog(self):
+        n = len(self.vault.entries)
+        steam = sum(1 for e in self.vault.entries if e.kind == "steam")
+        top = self._modal(w=480, h=360)
+        box = ctk.CTkFrame(top, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=28, pady=26)
+        ctk.CTkLabel(box, text="", image=self.keep(ui.icon("trash", 40, ui.WARN, stroke=0.07))).pack()
+        ctk.CTkLabel(box, text="Delete everything?", font=ui.font(19, "bold"),
+                     text_color=ui.TEXT).pack(pady=(10, 4))
+        detail = f"This permanently removes all {n} saved item{'s' if n != 1 else ''}"
+        detail += f", including {steam} Steam-linked account{'s' if steam != 1 else ''}." if steam else "."
+        ctk.CTkLabel(box, text=detail + " This cannot be undone.", font=ui.font(13),
+                     text_color=ui.MUTED, justify="center", wraplength=400).pack(pady=(0, 2))
+        field = ctk.CTkEntry(box, height=42, font=ui.mono(14), fg_color=ui.BG2,
+                             border_color=ui.LINE, border_width=1, corner_radius=9, justify="center",
+                             placeholder_text="type DELETE to confirm")
+        field.pack(fill="x", pady=(18, 0))
+
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", pady=(16, 0))
+        ui.ghost(row, "Cancel", top.destroy, width=120).pack(side="left")
+        btn = ctk.CTkButton(row, text="Delete all", width=150, height=40, corner_radius=10,
+                            font=ui.font(13, "bold"), fg_color=ui.BG3, text_color=ui.FAINT,
+                            hover_color=ui.BG3, state="disabled", image=ui.icon("trash", 16, ui.FAINT),
+                            compound="left")
+        btn.pack(side="right")
+
+        def check(_=None):
+            ok = field.get().strip() == "DELETE"
+            btn.configure(state="normal" if ok else "disabled",
+                          fg_color=ui.WARN if ok else ui.BG3,
+                          text_color="#2a0d0d" if ok else ui.FAINT,
+                          hover_color="#d94e4e" if ok else ui.BG3,
+                          image=ui.icon("trash", 16, "#2a0d0d" if ok else ui.FAINT))
+
+        def wipe():
+            if field.get().strip() != "DELETE":
+                return
+            self.vault.entries.clear()
+            self.vault.save()
+            top.destroy()
+            self.toast.show(f"Deleted all {n} item{'s' if n != 1 else ''}", ui.WARN, ms=4000)
+            self._render_entries()
+
+        field.bind("<KeyRelease>", check)
+        btn.configure(command=wipe)
+        self.after(140, lambda: self._focus(field))
 
     def _import_dialog(self):
         top = self._modal(w=580, h=520)

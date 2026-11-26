@@ -215,8 +215,9 @@ def test_steam_switch_sets_most_recent_and_autologin(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "is_steam_running", lambda: False)
     launched = {}
     monkeypatch.setattr(S, "launch_steam", lambda p: launched.setdefault("yes", True))
-    acc = S.switch("smurf", paths=paths)
-    assert acc.account == "smurf_acc"
+    res = S.switch("smurf", paths=paths)
+    assert res.account == "smurf_acc"
+    assert res.had_session is True
     data = S.vdf_parse(paths.loginusers.read_text())
     flags = {u["AccountName"]: u["MostRecent"] for u in data["users"].values()}
     assert flags == {"main_acc": "0", "smurf_acc": "1"}
@@ -225,10 +226,56 @@ def test_steam_switch_sets_most_recent_and_autologin(tmp_path, monkeypatch):
     assert launched["yes"]
 
 
-def test_steam_switch_unknown_account_raises(tmp_path):
+def test_steam_switch_saved_account_prepares_login(tmp_path, monkeypatch):
+    # an account Steam has forgotten: no error, but had_session is False and
+    # it becomes the auto-login user so Steam opens with the name filled in.
     paths = _fake_steam(tmp_path)
-    with pytest.raises(S.SteamError):
-        S.switch("nonexistent", paths=paths)
+    monkeypatch.setattr(S, "is_steam_running", lambda: False)
+    monkeypatch.setattr(S, "launch_steam", lambda p: None)
+    res = S.switch("ghost_acc", paths=paths)
+    assert res.had_session is False
+    assert res.account == "ghost_acc"
+    data = S.vdf_parse(paths.loginusers.read_text())
+    assert all(u["AccountName"] != "ghost_acc" for u in data["users"].values())
+    reg = S.vdf_parse(paths.registry_vdf.read_text())
+    assert reg["Registry"]["HKCU"]["Software"]["Valve"]["Steam"]["AutoLoginUser"] == "ghost_acc"
+
+
+def test_snapshot_and_restore_remembered(tmp_path):
+    paths = _fake_steam(tmp_path)
+    (paths.root / "ssfn12345").write_bytes(b"machineauth")
+    store = tmp_path / "sessions"
+    S.snapshot_sessions(paths, store)
+    assert (store / "loginusers.vdf").exists()
+    assert (store / "ssfn" / "ssfn12345").exists()
+
+    # Steam forgets smurf_acc, and the ssfn file is gone
+    data = S.vdf_parse(paths.loginusers.read_text())
+    data["users"] = {s: u for s, u in data["users"].items() if u["AccountName"] != "smurf_acc"}
+    paths.loginusers.write_text(S.vdf_dump(data))
+    (paths.root / "ssfn12345").unlink()
+
+    assert S.restore_remembered(paths, "smurf_acc", store) is True
+    back = S.vdf_parse(paths.loginusers.read_text())
+    names = {u["AccountName"]: u for u in back["users"].values()}
+    assert "smurf_acc" in names and names["smurf_acc"]["RememberPassword"] == "1"
+    assert (paths.root / "ssfn12345").exists()          # ssfn restored
+    assert S.restore_remembered(paths, "never_seen", store) is False
+
+
+def test_switch_restores_session_so_no_prompt(tmp_path, monkeypatch):
+    paths = _fake_steam(tmp_path)
+    store = tmp_path / "sessions"
+    S.snapshot_sessions(paths, store)
+    # Steam forgets smurf_acc
+    data = S.vdf_parse(paths.loginusers.read_text())
+    data["users"] = {s: u for s, u in data["users"].items() if u["AccountName"] != "smurf_acc"}
+    paths.loginusers.write_text(S.vdf_dump(data))
+    monkeypatch.setattr(S, "is_steam_running", lambda: False)
+    monkeypatch.setattr(S, "launch_steam", lambda p: None)
+    # without a store it would prompt; with the snapshot it restores -> no prompt
+    res = S.switch("smurf_acc", paths=paths, session_store=store)
+    assert res.had_session is True
 
 
 def test_steam_switch_backs_up_files(tmp_path, monkeypatch):

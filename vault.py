@@ -715,11 +715,13 @@ def cmd_steam(v: Vault, a) -> None:
         print(f"{len(accounts)} Steam account(s) on this machine")
     elif a.steam_cmd == "switch":
         try:
-            acc = steammod.switch(a.account, relaunch=not a.no_launch)
+            res = steammod.switch(a.account, relaunch=not a.no_launch)
         except steammod.SteamError as e:
             raise VaultError(str(e))
-        print(f"Switched to {acc.persona or acc.account}." +
-              ("" if a.no_launch else " Steam is starting."))
+        msg = f"Switched to {res.account}."
+        if not res.had_session:
+            msg += " Steam has no saved session for it, so it will prompt for the password."
+        print(msg + ("" if a.no_launch else " Steam is starting."))
     elif a.steam_cmd == "gui":
         try:
             steammod.run_gui(nicknames=nicknames())

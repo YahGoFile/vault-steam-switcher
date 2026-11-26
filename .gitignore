@@ -5,6 +5,8 @@ vault.json
 *.json.bak
 *.vaultbak
 export*.json
+steam_sessions/
+avatars/
 
 # --- python / build ---
 .venv/

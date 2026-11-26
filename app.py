@@ -9,8 +9,10 @@ the window never makes a network request. Launch via Vault.bat.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 import customtkinter as ctk
@@ -48,6 +50,10 @@ class VaultApp(ctk.CTk):
     def keep(self, img):
         self._imgs.append(img)
         return img
+
+    def _focus(self, widget):
+        if widget.winfo_exists():
+            widget.focus_set()
 
     # ----------------------------------------------------------------- gate
     def _show_gate(self):
@@ -96,7 +102,7 @@ class VaultApp(ctk.CTk):
         for e in (pw, pw2):
             if e:
                 e.bind("<Return>", submit)
-        self.after(120, pw.focus_set)
+        self.after(120, lambda: self._focus(pw))
 
     def _gate_entry(self, parent, placeholder):
         e = ctk.CTkEntry(parent, show="•", width=340, height=46, font=ui.font(14),
@@ -175,86 +181,188 @@ class VaultApp(ctk.CTk):
     def _view_steam(self):
         try:
             self.steam_paths = S._paths()
-            accounts = S.list_accounts(self.steam_paths)
+            live = S.list_accounts(self.steam_paths)
             err = None
         except S.SteamError as e:
-            self.steam_paths, accounts, err = None, [], str(e)
+            self.steam_paths, live, err = None, [], str(e)
 
-        active = next((a.persona or a.account for a in accounts if a.most_recent), None)
-        sub = (f"Signed in as {active} · click another to switch"
-               if active else "One click signs you in and restarts Steam")
-        self._header("Steam", sub)
+        if self.steam_paths:
+            self._sync_roster(live)                       # remember every account seen
+            S.snapshot_sessions(self.steam_paths, self._session_store())  # keep logins warm
 
-        if err:
-            return self._empty("gamepad", "Steam not found", err.split(".")[0]
-                               + ".\nSet STEAM_ROOT to your Steam folder, or sign in once.")
-        if not accounts:
+        live_by = {a.account.lower(): a for a in live}
+        roster = [e for e in self.vault.entries if e.kind == "steam" and e.username]
+        items = [(e, live_by.get(e.username.lower())) for e in roster]
+
+        def rank(it):
+            e, a = it
+            return 0 if (a and a.most_recent) else (1 if a else 2)
+        items.sort(key=lambda it: (rank(it), -float(it[0].extra.get("last_seen_ts", 0) or 0)))
+
+        active = next((self._steam_label(e, a) for e, a in items if a and a.most_recent), None)
+        n = len(items)
+        sub = (f"Signed in as {active} · {n} account{'s' if n != 1 else ''} saved"
+               if active else f"{n} account{'s' if n != 1 else ''} saved · click one to switch")
+        self._header("Steam", sub if items else "One click signs you in and restarts Steam")
+
+        if not items:
+            if err:
+                return self._empty("gamepad", "Steam not found", err.split(".")[0]
+                                   + ".\nSet STEAM_ROOT to your Steam folder, or sign in once.")
             return self._empty("gamepad", "No accounts yet",
-                               "Sign in to Steam once with “Remember me” ticked,\n"
-                               "then your accounts show up here.")
+                               "Sign in to Steam once with “Remember me” ticked.\n"
+                               "Every account you use is then saved here for one-click switching.")
 
         body = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=26, pady=(10, 20))
         body._scrollbar.configure(width=8)
-        nick = {e.username: (e.extra.get("nickname") or e.title)
-                for e in self.vault.entries if e.kind == "steam" and e.username}
-        for acc in accounts:
-            self._steam_card(body, acc, nick.get(acc.account))
+        for e, a in items:
+            self._steam_card(body, e, a)
 
-    def _steam_card(self, parent, acc, nickname):
+    # ---- roster persistence ----
+    def _sync_roster(self, live):
+        """Upsert every live Steam account into the vault so it's never lost."""
+        by_sid = {e.extra.get("steamid"): e for e in self.vault.entries
+                  if e.kind == "steam" and e.extra.get("steamid")}
+        by_acc = {e.username.lower(): e for e in self.vault.entries
+                  if e.kind == "steam" and e.username}
+        now = str(time.time())
+        changed = False
+        for a in live:
+            e = by_sid.get(a.steamid) or by_acc.get(a.account.lower())
+            if e is None:
+                e = V.Entry(title=f"Steam: {a.persona or a.account}", kind="steam",
+                            username=a.account, tags=["steam"])
+                self.vault.entries.append(e)
+                changed = True
+            if a.steamid and e.extra.get("steamid") != a.steamid:
+                e.extra["steamid"] = a.steamid
+                changed = True
+            if a.persona and e.extra.get("persona") != a.persona:
+                e.extra["persona"] = a.persona
+                changed = True
+            e.extra["last_seen_ts"] = now
+            if a.steamid:
+                self._persist_avatar(a.steamid)
+        if changed:
+            self.vault.save()
+
+    def _avatar_dir(self) -> Path:
+        d = self.vault_path.parent / "avatars"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _session_store(self) -> Path:
+        return self.vault_path.parent / "steam_sessions"
+
+    def _has_session_snapshot(self, account) -> bool:
+        snap = self._session_store() / "loginusers.vdf"
+        if not snap.exists():
+            return False
+        try:
+            users = S.vdf_parse(snap.read_text("utf-8", errors="replace")).get("users", {})
+        except Exception:
+            return False
+        return any(isinstance(u, dict) and u.get("AccountName", "").lower() == account.lower()
+                   for u in users.values())
+
+    def _persist_avatar(self, steamid):
+        """Copy Steam's cached avatar into our folder so it survives Steam forgetting it."""
+        src = S.avatar_path(self.steam_paths, steamid) if self.steam_paths else None
+        if not src:
+            return
+        dst = self._avatar_dir() / f"{steamid}.png"
+        try:
+            if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
+                shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+    def _steam_avatar(self, steamid):
+        live = S.avatar_path(self.steam_paths, steamid) if (self.steam_paths and steamid) else None
+        if live:
+            return live
+        saved = self.vault_path.parent / "avatars" / f"{steamid}.png" if steamid else None
+        return saved if (saved and saved.exists()) else None
+
+    def _steam_label(self, e, a):
+        return (e.extra.get("nickname") or e.extra.get("persona")
+                or (a.persona if a else "") or e.username)
+
+    def _steam_card(self, parent, e, a):
+        steamid = e.extra.get("steamid", "")
+        label = self._steam_label(e, a)
+        active = bool(a and a.most_recent)
+        saved = a is None                      # Steam no longer holds a session
+
         card = ctk.CTkFrame(parent, fg_color=ui.BG2, corner_radius=16,
                             border_width=1, border_color=ui.LINE, height=92)
         card.pack(fill="x", pady=7)
         card.pack_propagate(False)
-
-        if acc.most_recent:
+        if active:
             ctk.CTkFrame(card, fg_color=ui.TEAL, width=4, corner_radius=2).place(
                 relx=0, rely=0.5, anchor="w", relheight=0.56, x=2)
 
-        label = nickname or acc.persona or acc.account
-        av = self.keep(ui.avatar(label, 54, S.avatar_path(self.steam_paths, acc.steamid),
-                                 ring=ui.TEAL if acc.most_recent else ui.LINE2))
+        ring = ui.TEAL if active else (ui.LINE if saved else ui.LINE2)
+        av = self.keep(ui.avatar(label, 54, self._steam_avatar(steamid), ring=ring))
         ctk.CTkLabel(card, text="", image=av).pack(side="left", padx=(20, 16))
 
         mid = ctk.CTkFrame(card, fg_color="transparent")
         mid.pack(side="left", fill="y", expand=True, anchor="w")
         row = ctk.CTkFrame(mid, fg_color="transparent")
-        row.pack(anchor="w", pady=(22, 0))
-        ctk.CTkLabel(row, text=label, font=ui.font(17, "bold"), text_color=ui.TEXT).pack(side="left")
-        if acc.most_recent:
-            pill = ctk.CTkFrame(row, fg_color="#0f3328", corner_radius=7)
-            pill.pack(side="left", padx=10)
-            ctk.CTkLabel(pill, text="", image=self.keep(ui.icon("dot", 10, ui.GOOD))).pack(
-                side="left", padx=(8, 3), pady=3)
-            ctk.CTkLabel(pill, text="ACTIVE", font=ui.font(10, "bold"),
-                         text_color=ui.GOOD).pack(side="left", padx=(0, 9))
-        ctk.CTkLabel(mid, text=acc.account, font=ui.mono(12), text_color=ui.MUTED).pack(anchor="w")
+        row.pack(anchor="w", pady=(20, 0))
+        ctk.CTkLabel(row, text=label, font=ui.font(17, "bold"),
+                     text_color=ui.TEXT if not saved else ui.MUTED).pack(side="left")
+        if active:
+            self._pill(row, "ACTIVE", ui.GOOD, "#0f3328")
+        elif saved:
+            self._pill(row, "SAVED", ui.FAINT, ui.BG4)
+        has_snapshot = self._has_session_snapshot(e.username)
+        sub = e.username
+        if saved:
+            sub += "  ·  signs in from backup" if has_snapshot else "  ·  signed out — one login needed"
+        ctk.CTkLabel(mid, text=sub, font=ui.mono(12), text_color=ui.MUTED).pack(anchor="w")
 
         right = ctk.CTkFrame(card, fg_color="transparent")
         right.pack(side="right", padx=18)
-        if acc.most_recent:
-            ctk.CTkLabel(right, text="Signed in", font=ui.font(12), text_color=ui.FAINT).pack()
+        if active:
+            ctk.CTkLabel(right, text="Signed in", font=ui.font(12), text_color=ui.FAINT).pack(
+                side="right")
         else:
-            ui.primary(right, "Switch", lambda a=acc: self._do_switch(a),
-                       width=120, icon_name="chevron").pack()
+            ui.primary(right, "Switch", lambda: self._do_switch(e, a),
+                       width=118, icon_name="chevron").pack(side="right")
+            ui.icon_button(right, "trash", lambda: self._remove_steam(e), size=36).pack(
+                side="right", padx=(0, 8))
 
         def hov(c):
-            if not acc.most_recent:
+            if not active:
                 card.configure(fg_color=c)
-        card.bind("<Enter>", lambda _: hov(ui.BG3))
-        card.bind("<Leave>", lambda _: hov(ui.BG2))
-        for w in (mid, row):
+        for w in (card, mid, row):
             w.bind("<Enter>", lambda _: hov(ui.BG3))
             w.bind("<Leave>", lambda _: hov(ui.BG2))
 
-    def _do_switch(self, acc):
+    def _pill(self, parent, text, color, bg):
+        pill = ctk.CTkFrame(parent, fg_color=bg, corner_radius=7)
+        pill.pack(side="left", padx=10)
+        ctk.CTkLabel(pill, text="", image=self.keep(ui.icon("dot", 10, color))).pack(
+            side="left", padx=(8, 3), pady=3)
+        ctk.CTkLabel(pill, text=text, font=ui.font(10, "bold"), text_color=color).pack(
+            side="left", padx=(0, 9))
+
+    def _remove_steam(self, e):
+        self.vault.entries.remove(e)
+        self.vault.save()
+        self.toast.show(f"Removed {self._steam_label(e, None)} from the list", ui.WARN)
+        self._select("steam")
+
+    def _do_switch(self, e, a):
         overlay = ctk.CTkFrame(self.content, fg_color=ui.BG0, corner_radius=0)
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         box = ctk.CTkFrame(overlay, fg_color=ui.BG1, corner_radius=18,
                            border_width=1, border_color=ui.LINE)
         box.place(relx=0.5, rely=0.5, anchor="center")
-        label = acc.persona or acc.account
-        av = self.keep(ui.avatar(label, 76, S.avatar_path(self.steam_paths, acc.steamid),
+        label = self._steam_label(e, a)
+        av = self.keep(ui.avatar(label, 76, self._steam_avatar(e.extra.get("steamid", "")),
                                  ring=ui.ACCENT))
         ctk.CTkLabel(box, text="", image=av).pack(padx=66, pady=(38, 14))
         ctk.CTkLabel(box, text=f"Switching to {label}", font=ui.font(17, "bold"),
@@ -262,20 +370,24 @@ class VaultApp(ctk.CTk):
         status = ctk.CTkLabel(box, text="Closing Steam…", font=ui.font(13), text_color=ui.MUTED)
         status.pack(pady=(5, 38))
 
-        def done(ok, msg):
+        def done(res, msg):
             overlay.destroy()
-            if ok:
+            if msg:
+                return self.toast.show(msg, ui.WARN, ms=6000)
+            if res.had_session:
                 self.toast.show(f"Signed in as {label} — Steam is starting", ui.GOOD)
-                self._select("steam")
             else:
-                self.toast.show(msg, ui.WARN, ms=6000)
+                self.toast.show(f"Steam signed {e.username} out earlier, so it needs one "
+                                "login — then it's saved for good", ui.ACCENT_HI, ms=7000)
+            self._select("steam")
 
         def work():
             try:
-                S.switch(acc.account, paths=self.steam_paths)
-                self.after(0, lambda: done(True, None))
-            except S.SteamError as e:
-                self.after(0, lambda m=str(e): done(False, m))
+                res = S.switch(e.username, paths=self.steam_paths,
+                               session_store=self._session_store())
+                self.after(0, lambda: done(res, None))
+            except S.SteamError as ex:
+                self.after(0, lambda m=str(ex): done(None, m))
 
         self.after(60, lambda: status.configure(text="Setting active account & relaunching…"))
         threading.Thread(target=work, daemon=True).start()
@@ -432,7 +544,7 @@ class VaultApp(ctk.CTk):
             self._render_entries()
 
         ui.primary(box, "Save", save, width=418).pack(pady=(22, 0))
-        self.after(140, title.focus_set)
+        self.after(140, lambda: self._focus(title))
 
     def _detail_dialog(self, e):
         top = self._modal(w=500)

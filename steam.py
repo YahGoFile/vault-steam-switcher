@@ -232,6 +232,76 @@ def avatar_path(paths: SteamPaths, steamid: str) -> Path | None:
     return None
 
 
+def ssfn_files(paths: SteamPaths) -> list[Path]:
+    """Steam Guard machine-auth files in the Steam root (ssfn*)."""
+    try:
+        return [p for p in paths.root.glob("ssfn*") if p.is_file()]
+    except OSError:
+        return []
+
+
+def snapshot_sessions(paths: SteamPaths, store: Path) -> None:
+    """Save the current signed-in state so accounts can be restored later.
+
+    Copies loginusers.vdf (which accounts Steam remembers) and the ssfn machine-
+    auth files. Copy-only and non-destructive: it never changes Steam's files.
+    """
+    store = Path(store)
+    store.mkdir(parents=True, exist_ok=True)
+    # Merge, don't overwrite: an account Steam has since forgotten must stay in the
+    # snapshot so it can be restored later. Current live entries win for shared keys.
+    snap = store / "loginusers.vdf"
+    merged = {}
+    if snap.exists():
+        merged = vdf_parse(snap.read_text("utf-8", errors="replace")).get("users", {})
+    if paths.loginusers.exists():
+        cur = vdf_parse(paths.loginusers.read_text("utf-8", errors="replace")).get("users", {})
+        merged.update(cur)
+    if merged:
+        snap.write_text(vdf_dump({"users": merged}), "utf-8")
+    sdir = store / "ssfn"
+    sdir.mkdir(exist_ok=True)
+    for f in ssfn_files(paths):
+        try:
+            shutil.copy2(f, sdir / f.name)
+        except OSError:
+            pass
+
+
+def restore_remembered(paths: SteamPaths, account: str, store: Path) -> bool:
+    """Re-add `account` to loginusers.vdf from the last snapshot (and restore ssfn
+    files), so Steam treats it as remembered again. Returns True if restored."""
+    store = Path(store)
+    snap = store / "loginusers.vdf"
+    if not snap.exists():
+        return False
+    saved = vdf_parse(snap.read_text("utf-8", errors="replace")).get("users", {})
+    sid, block = None, None
+    for s, u in saved.items():
+        if isinstance(u, dict) and u.get("AccountName", "").lower() == account.lower():
+            sid, block = s, dict(u)
+            break
+    if not block:
+        return False
+    for f in (store / "ssfn").glob("ssfn*") if (store / "ssfn").exists() else []:
+        dst = paths.root / f.name
+        if not dst.exists():
+            try:
+                shutil.copy2(f, dst)
+            except OSError:
+                pass
+    data = (vdf_parse(paths.loginusers.read_text("utf-8", errors="replace"))
+            if paths.loginusers.exists() else {})
+    users = data.setdefault("users", {})
+    block["RememberPassword"] = "1"
+    block["AllowAutoLogin"] = "1"
+    users[sid] = block
+    _backup(paths.loginusers)
+    paths.loginusers.parent.mkdir(parents=True, exist_ok=True)
+    paths.loginusers.write_text(vdf_dump(data), "utf-8")
+    return True
+
+
 def _resolve(accounts: list[SteamAccount], ref: str) -> SteamAccount:
     ref_l = ref.lower()
     for a in accounts:
@@ -257,7 +327,14 @@ def _backup(p: Path) -> None:
         pass
 
 
-def _set_loginusers_most_recent(paths: SteamPaths, account: str) -> None:
+def _set_loginusers_most_recent(paths: SteamPaths, account: str) -> bool:
+    """Mark `account` as the most-recent user in loginusers.vdf.
+
+    Returns True if Steam already has a stored session for the account (so the
+    switch is instant), False if it doesn't (Steam will show its login prompt).
+    """
+    if not paths.loginusers.exists():
+        return False
     text = paths.loginusers.read_text("utf-8", errors="replace")
     data = vdf_parse(text)
     users = data.get("users", {})
@@ -271,11 +348,10 @@ def _set_loginusers_most_recent(paths: SteamPaths, account: str) -> None:
             info["RememberPassword"] = "1"
             info["AllowAutoLogin"] = "1"
             matched = True
-    if not matched:
-        raise SteamError(f"'{account}' isn't set up in Steam on this machine yet. "
-                         "Sign in to it once in Steam (tick 'Remember me'), then switching will work.")
-    _backup(paths.loginusers)
-    paths.loginusers.write_text(vdf_dump(data), "utf-8")
+    if matched:
+        _backup(paths.loginusers)
+        paths.loginusers.write_text(vdf_dump(data), "utf-8")
+    return matched
 
 
 def _set_autologin(paths: SteamPaths, account: str) -> None:
@@ -358,15 +434,36 @@ def launch_steam(paths: SteamPaths) -> None:
                          "Start Steam yourself.") from None
 
 
-def switch(ref: str, relaunch: bool = True, paths: SteamPaths | None = None) -> SteamAccount:
+@dataclass
+class SwitchResult:
+    account: str
+    had_session: bool          # True = instant sign-in; False = Steam will prompt
+    steamid: str = ""
+
+
+def switch(ref: str, relaunch: bool = True, paths: SteamPaths | None = None,
+           session_store: Path | str | None = None) -> SwitchResult:
+    """Make `ref` the active Steam account and (optionally) relaunch Steam.
+
+    If Steam no longer holds a session for the account but we have a saved
+    snapshot (session_store), restore it first so the sign-in stays password-less.
+    had_session is True when Steam will sign in without prompting.
+    """
     paths = paths or _paths()
-    account = _resolve(list_accounts(paths), ref)
+    try:
+        acc = _resolve(list_accounts(paths), ref)
+        name, steamid = acc.account, acc.steamid
+    except SteamError:
+        acc, name, steamid = None, ref, ""     # saved account Steam no longer holds
     shutdown_steam(paths)
-    _set_loginusers_most_recent(paths, account.account)
-    _set_autologin(paths, account.account)
+    had_session = _set_loginusers_most_recent(paths, name)
+    if not had_session and session_store is not None:
+        if restore_remembered(paths, name, session_store):
+            had_session = _set_loginusers_most_recent(paths, name)
+    _set_autologin(paths, name)
     if relaunch:
         launch_steam(paths)
-    return account
+    return SwitchResult(account=name, had_session=had_session, steamid=steamid)
 
 
 # --------------------------------------------------------------------------- #
@@ -472,9 +569,11 @@ def _main(argv: list[str]) -> int:
                 flag = " (active)" if acc.most_recent else ""
                 print(f"{acc.account:<24} {acc.persona:<20} {acc.steamid}{flag}")
         elif a.cmd == "switch":
-            acc = switch(a.account, relaunch=not a.no_launch)
-            print(f"Switched to {acc.persona or acc.account}." +
-                  ("" if a.no_launch else " Steam is starting."))
+            res = switch(a.account, relaunch=not a.no_launch)
+            msg = f"Switched to {res.account}."
+            if not res.had_session:
+                msg += " Steam has no saved session for it, so it will prompt for the password."
+            print(msg + ("" if a.no_launch else " Steam is starting."))
         elif a.cmd == "gui":
             run_gui()
         elif a.cmd == "shortcuts":

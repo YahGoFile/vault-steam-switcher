@@ -15,6 +15,7 @@ Dark, native desktop app · AES-256-GCM + Argon2id · no cloud, no telemetry, no
 ## What it does
 
 - **Switch Steam accounts in one click.** Pick an account and Vault signs you in and restarts Steam for you — no retyping passwords. It uses Steam's *own* saved session tokens, the same mechanism as the open-source TcNo switcher.
+- **Every account is remembered forever.** Each account you sign into is saved to a persistent roster — it stays in the list for one-click switching even after Steam itself forgets it. Vault also backs up each account's Steam session files while it's signed in and restores them on switch, so switching stays password-less.
 - **Store logins, emails and notes**, encrypted with modern crypto. Search, reveal, copy-to-clipboard (auto-clears after 20s), generate strong passwords.
 - **Bulk import** credentials in the `Login … Password : … Email Account : … Webmail : …` format, on one line or many.
 
@@ -55,8 +56,9 @@ Requires Python 3.10+ (and Tk — bundled with python.org installers; on Linux `
 
 Steam keeps a login session token for every account you've signed into on a machine. Vault switches by: gracefully closing Steam → setting `AutoLoginUser` + marking the account "most recent" → relaunching. Steam then signs in with its stored token.
 
-- It only switches between accounts **already set up on your PC** (signed in once with *Remember me*). A first-time account just gets Steam's normal login prompt — nothing is bypassed.
-- Files are backed up to `*.vaultbak` before any change.
+- **Persistent roster + session backup:** accounts are saved to the vault and their Steam session files (`loginusers.vdf` + `ssfn*` machine-auth) are snapshotted to a `steam_sessions/` folder while signed in. On switch, Vault restores them, so the sign-in stays password-less.
+- It only switches between accounts **already set up on your PC** (signed in once with *Remember me*). The one time Steam will still ask: if you fully sign an account out or Steam Guard revokes its session server-side, Steam requires a single re-login — a security limit no switcher can bypass. After that login, it's saved again.
+- All changes are backed up (`*.vaultbak`) first, and Vault only ever copies/edits Steam's own files — never deletes them.
 - **Windows:** `HKCU\Software\Valve\Steam` + `config\loginusers.vdf` · **Linux:** `~/.steam/registry.vdf` · **macOS:** `~/Library/Application Support/Steam/…`
 - Set the `STEAM_ROOT` environment variable if Steam is installed somewhere unusual.
 

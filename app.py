@@ -317,10 +317,14 @@ class VaultApp(ctk.CTk):
             self._pill(row, "ACTIVE", ui.GOOD, "#0f3328")
         elif saved:
             self._pill(row, "SAVED", ui.FAINT, ui.BG4)
-        has_snapshot = self._has_session_snapshot(e.username)
         sub = e.username
         if saved:
-            sub += "  ·  signs in from backup" if has_snapshot else "  ·  signed out — one login needed"
+            if self._has_session_snapshot(e.username):
+                sub += "  ·  signs in from backup"
+            elif e.password:
+                sub += "  ·  password saved — one-paste login"
+            else:
+                sub += "  ·  signed out — one login needed"
         ctk.CTkLabel(mid, text=sub, font=ui.mono(12), text_color=ui.MUTED).pack(anchor="w")
 
         right = ctk.CTkFrame(card, fg_color="transparent")
@@ -376,9 +380,13 @@ class VaultApp(ctk.CTk):
                 return self.toast.show(msg, ui.WARN, ms=6000)
             if res.had_session:
                 self.toast.show(f"Signed in as {label} — Steam is starting", ui.GOOD)
+            elif e.password:
+                self._set_clip(e.password)
+                self.toast.show(f"First sign-in for {e.username} — password copied, just paste it "
+                                "(Steam remembers it after that)", ui.ACCENT_HI, ms=7000)
             else:
-                self.toast.show(f"Steam signed {e.username} out earlier, so it needs one "
-                                "login — then it's saved for good", ui.ACCENT_HI, ms=7000)
+                self.toast.show(f"Steam needs one login for {e.username} — then it's saved for good",
+                                ui.ACCENT_HI, ms=7000)
             self._select("steam")
 
         def work():
@@ -476,6 +484,15 @@ class VaultApp(ctk.CTk):
         except Exception:
             self.toast.show("Couldn't access the clipboard", ui.WARN)
 
+    def _set_clip(self, value):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(value)
+            self.update()
+            self.after(20000, self._clear_clip(value))
+        except Exception:
+            pass
+
     def _clear_clip(self, value):
         def _c():
             try:
@@ -514,7 +531,7 @@ class VaultApp(ctk.CTk):
         return e
 
     def _add_dialog(self):
-        top = self._modal(h=560)
+        top = self._modal(h=620)
         box = ctk.CTkFrame(top, fg_color="transparent")
         box.pack(fill="both", expand=True, padx=26, pady=22)
         ctk.CTkLabel(box, text="Add login", font=ui.font(19, "bold"), text_color=ui.TEXT).pack(
@@ -532,18 +549,38 @@ class VaultApp(ctk.CTk):
         ui.ghost(prow, "Generate", lambda: (pw.delete(0, "end"), pw.insert(0, V.generate_password())),
                  width=104).pack(side="left", padx=(8, 0))
 
+        link = ctk.CTkCheckBox(box, text="  Link as a Steam account — show it in the Steam switcher",
+                               font=ui.font(12), text_color=ui.TEXT, fg_color=ui.ACCENT,
+                               hover_color=ui.ACCENT_LO, checkbox_width=20, checkbox_height=20,
+                               border_color=ui.LINE2, corner_radius=6)
+        link.pack(anchor="w", pady=(16, 0))
+        hint = ctk.CTkLabel(box, text="Username must be your Steam account (login) name.",
+                            font=ui.font(11), text_color=ui.FAINT)
+        hint.pack(anchor="w", padx=28)
+        hint.pack_forget()
+        link.configure(command=lambda: hint.pack(anchor="w", padx=28) if link.get()
+                       else hint.pack_forget())
+
         def save():
             if not title.get().strip():
                 return
+            is_steam = bool(link.get())
             e = V.Entry(title=title.get().strip(), url=url.get().strip(),
-                        username=user.get().strip(), password=pw.get() or V.generate_password())
+                        username=user.get().strip(), password=pw.get() or V.generate_password(),
+                        kind="steam" if is_steam else "login")
+            if is_steam:
+                e.extra["nickname"] = e.title
+                e.tags = sorted(set(e.tags + ["steam"]))
             self.vault.entries.append(e)
             self.vault.save()
             top.destroy()
-            self.toast.show(f"Saved “{e.title}”", ui.GOOD)
-            self._render_entries()
+            self.toast.show(f"Saved “{e.title}”" + (" · added to Steam" if is_steam else ""), ui.GOOD)
+            if is_steam:
+                self._select("steam")
+            else:
+                self._render_entries()
 
-        ui.primary(box, "Save", save, width=418).pack(pady=(22, 0))
+        ui.primary(box, "Save", save, width=418).pack(pady=(20, 0))
         self.after(140, lambda: self._focus(title))
 
     def _detail_dialog(self, e):
@@ -599,6 +636,30 @@ class VaultApp(ctk.CTk):
         reveal.pack(side="left")
         ui.ghost(btns, "Delete", lambda: self._delete(e, top), width=100, color=ui.WARN,
                  icon_name="trash").pack(side="right")
+        if e.kind == "steam":
+            ui.ghost(btns, "Unlink Steam", lambda: self._toggle_steam_link(e, top, False),
+                     width=130, color=ui.MUTED, icon_name="gamepad").pack(side="right", padx=8)
+        elif e.username:
+            ui.ghost(btns, "Link to Steam", lambda: self._toggle_steam_link(e, top, True),
+                     width=130, color=ui.TEAL, icon_name="gamepad").pack(side="right", padx=8)
+
+    def _toggle_steam_link(self, e, top, link):
+        if link:
+            e.kind = "steam"
+            e.extra.setdefault("nickname", e.title)
+            e.tags = sorted(set(e.tags + ["steam"]))
+        else:
+            e.kind = "login"
+            e.tags = [t for t in e.tags if t != "steam"]
+        e.updated = V._now()
+        self.vault.save()
+        top.destroy()
+        if link:
+            self.toast.show(f"“{e.title}” is now in the Steam switcher", ui.GOOD)
+            self._select("steam")
+        else:
+            self.toast.show(f"“{e.title}” removed from the Steam switcher", ui.MUTED)
+            self._select("pw")
 
     def _delete(self, e, top):
         self.vault.entries.remove(e)
@@ -608,31 +669,49 @@ class VaultApp(ctk.CTk):
         self._render_entries()
 
     def _import_dialog(self):
-        top = self._modal(w=580, h=480)
+        top = self._modal(w=580, h=520)
         box = ctk.CTkFrame(top, fg_color="transparent")
         box.pack(fill="both", expand=True, padx=26, pady=24)
         ctk.CTkLabel(box, text="Import accounts", font=ui.font(19, "bold"),
                      text_color=ui.TEXT).pack(anchor="w")
         ctk.CTkLabel(box, text="Paste lines like:  Login … Password : … Email Account : … Webmail : …",
                      font=ui.font(12), text_color=ui.MUTED).pack(anchor="w", pady=(3, 12))
-        tb = ctk.CTkTextbox(box, height=210, font=ui.mono(12), fg_color=ui.BG2,
+        tb = ctk.CTkTextbox(box, height=200, font=ui.mono(12), fg_color=ui.BG2,
                             border_color=ui.LINE, border_width=1, corner_radius=10)
         tb.pack(fill="both", expand=True)
+
+        as_steam = ctk.CTkCheckBox(box, text="  These are Steam accounts — add them to the switcher",
+                                   font=ui.font(12), text_color=ui.TEXT, fg_color=ui.ACCENT,
+                                   hover_color=ui.ACCENT_LO, checkbox_width=20, checkbox_height=20,
+                                   border_color=ui.LINE2, corner_radius=6)
+        as_steam.pack(anchor="w", pady=(14, 0))
 
         def do():
             text = tb.get("1.0", "end").strip()
             if not text:
                 return
+            steam = bool(as_steam.get())
             found = V.parse_accounts(text)
-            added = sum(1 for e in found if not self.vault.is_duplicate(e)
-                        and (self.vault.entries.append(e) or True))
+            added = 0
+            for e in found:
+                if self.vault.is_duplicate(e):
+                    continue
+                if steam:
+                    e.kind = "steam"
+                    e.title = e.username or e.title       # the Steam login is the cleanest label
+                    e.extra["nickname"] = e.title
+                    e.tags = sorted(set(e.tags + ["steam"]))
+                self.vault.entries.append(e)
+                added += 1
             if added:
                 self.vault.save()
             top.destroy()
             dup = len(found) - added
-            self.toast.show(f"Imported {added} account(s)" + (f", skipped {dup} duplicate(s)" if dup else ""),
+            self.toast.show(f"Imported {added} account(s)"
+                            + (f" to Steam" if steam and added else "")
+                            + (f", skipped {dup} duplicate(s)" if dup else ""),
                             ui.GOOD if added else ui.WARN)
-            self._render_entries()
+            self._select("steam" if steam and added else "pw")
 
         ui.primary(box, "Parse & import", do, width=528).pack(pady=(16, 0))
 

@@ -18,6 +18,7 @@ Dark, native desktop app · AES-256-GCM + Argon2id · no cloud, no telemetry, no
 - **Every account is remembered forever.** Each account you sign into is saved to a persistent roster — it stays in the list for one-click switching even after Steam itself forgets it. Vault also backs up each account's Steam session files while it's signed in and restores them on switch, so switching stays password-less.
 - **Store logins, emails and notes**, encrypted with modern crypto. Search, reveal, copy-to-clipboard (auto-clears after 20s), generate strong passwords.
 - **Bulk import** credentials in the `Login … Password : … Email Account : … Webmail : …` format, on one line or many.
+- **Link stored logins to Steam.** Tick "Link as a Steam account" when adding or importing (or hit *Link to Steam* on any entry) and it shows up in the switcher too — the Passwords entry and the Steam account are the same linked thing.
 
 | Passwords | Entry detail |
 |---|---|
